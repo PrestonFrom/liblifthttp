@@ -360,14 +360,32 @@ auto requests_accept_async(
     }
 
     for (auto& request : event_loop->m_grabbed_requests) {
-        /**
-         * Drop the unique_ptr safety around the RequestHandle while it is being
-         * processed by curl.  When curl is finished completing the request
-         * it will be put back into a Request object for the client to use.
-         */
-        auto* raw_request_handle_ptr = request.m_request_handle.release();
+        auto& raw_request_handle = request.m_request_handle;
 
-        curl_multi_add_handle(event_loop->m_cmh, raw_request_handle_ptr->m_curl_handle);
+        auto curl_code = curl_multi_add_handle(event_loop->m_cmh, raw_request_handle->m_curl_handle);
+
+        if(curl_code != CURLM_OK && curl_code != CURLM_CALL_MULTI_PERFORM)
+        {
+            // Move it back to pending, we can try again on the next iteration.
+            request->setCompletionStatus(CURLcode::CURLE_SEND_ERROR);
+            request->onComplete();
+        }
+        else
+        {
+            /**
+             * Immediately call curls check action to get the current request moving.
+             * Curl appears to have an internal queue and if it gets too long it might
+             * drop requests.
+             */
+            event_loop->checkActions();
+
+            /**
+             * Drop the unique_ptr safety around the RequestHandle while it is being
+             * processed by curl.  When curl is finished completing the request
+             * it will be put back into a Request object for the client to use.
+             */
+            (void)request.m_request_handle.release();
+        }
     }
 
     event_loop->m_active_request_count += event_loop->m_grabbed_requests.size();
